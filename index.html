@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>竞彩台账工作台</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">竞</div>
+        <div class="brand-text">
+          <div class="brand-title">竞彩台账</div>
+          <div class="brand-sub">WORKBENCH</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-page="dashboard">
+          <span class="nav-ico">◫</span><span>总览看板</span>
+        </button>
+        <button class="nav-item" data-page="ledger">
+          <span class="nav-ico">▤</span><span>投注明细</span>
+        </button>
+        <button class="nav-item" data-page="accounts">
+          <span class="nav-ico">◈</span><span>账号分析</span>
+        </button>
+        <button class="nav-item" data-page="data">
+          <span class="nav-ico">⛁</span><span>数据与备份</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="db-dot"><span class="dot"></span> 本地数据库</div>
+        <div class="db-path" id="sideDbPath">data/app.db</div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="menu-btn" id="menuBtn" aria-label="菜单">☰</button>
+          <div>
+            <div class="crumb">工作台 / <span id="crumbPage">总览看板</span></div>
+            <h1 id="pageTitle">总览看板</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn btn-ghost hide-sm" id="btnSnapshot" title="导出单文件只读网页">导出快照</button>
+          <button class="btn btn-primary" id="btnAddTop">+ 记一笔</button>
+        </div>
+      </header>
+
+      <div class="rangebar" id="rangeBar">
+        <div class="rangebar-left">
+          <span class="rangebar-label">时间范围</span>
+          <div class="range-chips" id="rangeChips">
+            <button class="range-chip active" data-range="all">全部</button>
+            <button class="range-chip" data-range="today">今天</button>
+            <button class="range-chip" data-range="yesterday">昨天</button>
+            <button class="range-chip" data-range="week">近7天</button>
+            <button class="range-chip" data-range="month">近30天</button>
+            <button class="range-chip" data-range="custom">自定义</button>
+          </div>
+        </div>
+        <div class="rangebar-right" id="rangeCustom" style="display:none">
+          <input type="date" id="rangeFrom" aria-label="开始日期">
+          <span class="range-sep">至</span>
+          <input type="date" id="rangeTo" aria-label="结束日期">
+          <button class="btn btn-primary btn-sm" id="rangeApply">应用</button>
+        </div>
+        <div class="rangebar-summary" id="rangeSummary"></div>
+      </div>
+
+      <div class="content" id="content">
+        <div class="setup-banner" id="setupBanner" style="display:none">
+          <div class="setup-ico">⛁</div>
+          <div class="setup-body">
+            <div class="setup-title">还没有连上数据源</div>
+            <div class="setup-text" id="setupText"></div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="setupGo">去配置</button>
+        </div>
+        <!-- ============ DASHBOARD ============ -->
+        <section class="page active" id="page-dashboard">
+          <div class="kpi-grid" id="kpiGrid"></div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">累计盈亏走势</div>
+                <div class="panel-sub">各账号随投注笔数变化的累计盈亏</div>
+              </div>
+              <div class="legend" id="trendLegend"></div>
+            </div>
+            <div class="chart-wrap chart-trend" id="trendChart"></div>
+          </div>
+
+          <div class="two-col">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="panel-title">各账号盈亏对比</div>
+                  <div class="panel-sub">红=盈利 · 绿=亏损</div>
+                </div>
+              </div>
+              <div class="chart-wrap chart-fit" id="accountChart"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="panel-title">账户汇总</div>
+                  <div class="panel-sub">投入 / 回报 / 盈亏 / 命中率</div>
+                </div>
+              </div>
+              <div class="table-scroll" id="accountTableWrap"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">最近投注</div>
+                <div class="panel-sub">最新 8 笔记录</div>
+              </div>
+              <button class="link-btn" data-goto="ledger">查看全部 →</button>
+            </div>
+            <div class="table-scroll" id="recentTableWrap"></div>
+          </div>
+        </section>
+
+        <!-- ============ LEDGER ============ -->
+        <section class="page" id="page-ledger">
+          <div class="panel">
+            <div class="panel-head filter-bar">
+              <div class="filters">
+                <label>账号
+                  <select id="filterAccount"><option value="__all__">全部</option></select>
+                </label>
+                <label>结果
+                  <select id="filterResult">
+                    <option value="__all__">全部</option>
+                    <option value="win">命中</option>
+                    <option value="loss">未中</option>
+                  </select>
+                </label>
+                <label>关键词
+                  <input type="text" id="filterKw" placeholder="搜索方案 / 备注">
+                </label>
+              </div>
+              <div class="filter-summary" id="filterSummary"></div>
+            </div>
+            <div class="table-scroll" id="ledgerTableWrap"></div>
+          </div>
+        </section>
+
+        <!-- ============ ACCOUNTS ============ -->
+        <section class="page" id="page-accounts">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">账号管理</div>
+                <div class="panel-sub">增删账号、改名；历史记录会跟着改名自动联动</div>
+              </div>
+              <button class="btn btn-primary btn-sm" id="btnAddAccount" title="新增账号">+ 新增账号</button>
+            </div>
+            <div class="account-manage" id="accountManage"></div>
+          </div>
+
+          <div class="account-cards" id="accountCards"></div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">倍投本金参考</div>
+                <div class="panel-sub">来自原始表格底部的本金方案</div>
+              </div>
+            </div>
+            <div class="table-scroll" id="multiplierTableWrap"></div>
+          </div>
+        </section>
+
+        <!-- ============ DATA ============ -->
+        <section class="page" id="page-data">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">数据源设置</div>
+                <div class="panel-sub">本机用「本地数据库」，出门用「GitHub 云端」；切换后数据格式一致</div>
+              </div>
+              <span class="badge" id="storeBadge">本地数据库</span>
+            </div>
+            <div class="store-panel" id="storePanel">
+              <div class="mode-switch" id="modeSwitch">
+                <button class="mode-btn active" data-mode="server">本机数据库</button>
+                <button class="mode-btn" data-mode="github">GitHub 云端</button>
+              </div>
+              <div class="store-status" id="storeStatus"></div>
+              <div class="gh-form" id="ghForm" style="display:none">
+                <div class="form-hint" id="ghHint">
+                  在 GitHub 建两个仓库：<b>公开仓库</b>放网页，<b>私有仓库</b>放数据 <code>data.json</code>。
+                  再生成一个只授权该<b>私有数据仓库</b>的 fine-grained token（Contents 读写）。令牌只存在本设备浏览器里。
+                </div>
+                <div class="form-grid">
+                  <label class="field"><span>GitHub 用户名</span>
+                    <input type="text" id="ghOwner" placeholder="如 zhangsan" autocomplete="off">
+                  </label>
+                  <label class="field"><span>数据仓库名</span>
+                    <input type="text" id="ghRepo" placeholder="如 jc-ledger-data" autocomplete="off">
+                  </label>
+                  <label class="field"><span>数据文件路径</span>
+                    <input type="text" id="ghPath" value="data.json" placeholder="data.json">
+                  </label>
+                  <label class="field"><span>分支</span>
+                    <input type="text" id="ghBranch" value="main" placeholder="main">
+                  </label>
+                  <label class="field span2"><span>访问令牌 (fine-grained token)</span>
+                    <input type="password" id="ghToken" placeholder="github_pat_..." autocomplete="off">
+                  </label>
+                </div>
+                <div class="gh-actions">
+                  <button class="btn btn-ghost" id="ghTest">测试连接</button>
+                  <button class="btn btn-primary" id="ghSave">保存配置</button>
+                </div>
+                <div class="gh-result" id="ghResult"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel db-panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">数据库信息</div>
+                <div class="panel-sub">你的数据真实存放在这个 SQLite 文件里</div>
+              </div>
+              <span class="badge" id="dbModeBadge">本地模式</span>
+            </div>
+            <div class="db-grid" id="dbGrid"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">导出与备份</div>
+                <div class="panel-sub">备份前请先关闭服务，待 WAL 日志合并后拷贝 app.db</div>
+              </div>
+            </div>
+            <div class="action-grid">
+              <button class="action-card" id="actExportCsv">
+                <div class="action-ico">⇩</div>
+                <div class="action-name">导出 CSV</div>
+                <div class="action-desc">明细表格，可用 Excel 打开</div>
+              </button>
+              <button class="action-card" id="actSnapshot">
+                <div class="action-ico">⧉</div>
+                <div class="action-name">导出快照</div>
+                <div class="action-desc">数据内嵌的单文件只读网页</div>
+              </button>
+              <button class="action-card" id="actRefresh">
+                <div class="action-ico">↻</div>
+                <div class="action-name">刷新数据</div>
+                <div class="action-desc">从数据库重新载入全部内容</div>
+              </button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">数据说明</div>
+              </div>
+            </div>
+            <div class="note-block" id="noteBlock"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- 遮罩：移动端侧栏 -->
+  <div class="nav-overlay" id="navOverlay"></div>
+
+  <!-- 记录 Modal -->
+  <div class="modal-mask" id="modalMask">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="modalTitle">记一笔</h2>
+        <button class="modal-close" id="modalClose">×</button>
+      </div>
+      <form id="recordForm">
+        <input type="hidden" id="fId">
+        <div class="form-grid">
+          <label class="field"><span>账号</span>
+            <select id="fAccount" required></select>
+          </label>
+          <label class="field" id="fNewAccountWrap" style="display:none"><span>新账号名称</span>
+            <input type="text" id="fNewAccount" placeholder="输入新账号名" maxlength="24">
+          </label>
+          <label class="field"><span>日期</span>
+            <input type="date" id="fDate">
+          </label>
+          <label class="field span2"><span>方案</span>
+            <input type="text" id="fPlan" placeholder="如：03让胜05让胜 / 5胜胜7负">
+          </label>
+          <label class="field"><span>投入金额</span>
+            <input type="number" id="fStake" min="0" step="0.01" inputmode="decimal" placeholder="0.00" required>
+          </label>
+          <label class="field"><span>回报金额</span>
+            <input type="number" id="fPayout" min="0" step="0.01" inputmode="decimal" value="0" placeholder="0.00" required>
+          </label>
+          <label class="field span2"><span>备注</span>
+            <input type="text" id="fNote" placeholder="可选">
+          </label>
+        </div>
+        <div class="profit-preview" id="profitPreview">盈亏：<b>—</b></div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-danger" id="btnDelete" style="display:none;margin-right:auto">删除这笔</button>
+          <button type="button" class="btn btn-ghost" id="modalCancel">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 账号 Modal（新增/改名/删除转移） -->
+  <div class="modal-mask" id="accountModalMask">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2 id="accModalTitle">新增账号</h2>
+        <button class="modal-close" id="accModalClose">×</button>
+      </div>
+      <form id="accountForm">
+        <div id="accFormBody"></div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" id="accModalCancel">取消</button>
+          <button type="submit" class="btn btn-primary" id="accFormSubmit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="./storage.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
