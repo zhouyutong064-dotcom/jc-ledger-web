@@ -7,6 +7,7 @@
   const state = {
     data: null,
     db: null,
+    full: null,          // 未筛选的全量数据（本地重算用，含 meta/accountList/multiplier）
     page: 'dashboard',
     hiddenSeries: new Set(),
     range: { type: 'all', from: '', to: '' },
@@ -74,25 +75,22 @@
   }
 
   // ---------- 数据加载 ----------
-  async function load() {
+  // force=true 才真正打网络（首屏/手动刷新/配置变更）；其余走缓存或本地重算
+  async function load(force) {
     try {
       if (READONLY) {
         state.data = SNAP;
+        state.full = SNAP;
         state.db = SNAP.db || null;
       } else {
         const range = { from: state.range.from, to: state.range.to };
-        const [d, b] = await Promise.all([
-          Store.load(range),
-          Store.dbInfo().catch(() => null),
-        ]);
+        const d = await Store.load(range, !!force);
         state.data = d;
-        state.db = b;
+        state.full = d._full || null;
+        // dbInfo 只读缓存，不发请求；若缓存还没有就用 data 兜底
+        state.db = await Store.dbInfo().catch(() => null);
       }
-      seedColors();
-      $('#setupBanner').style.display = 'none';
-      renderRangeBar();
-      renderAll();
-      renderStoreBar();
+      applyLoaded();
     } catch (e) {
       const cfg = Store.getConfig();
       const noCloud = cfg.mode === 'github' && (!cfg.token || !cfg.owner || !cfg.repo);
@@ -102,6 +100,31 @@
       }
       toast('数据载入失败：' + (e.message || '请检查数据源配置'));
     }
+  }
+
+  function applyLoaded() {
+    seedColors();
+    $('#setupBanner').style.display = 'none';
+    renderRangeBar();
+    renderAll();
+    renderStoreBar();
+  }
+
+  // 切筛选/只读快照切页：纯本地重算，不发网络
+  function refilterLocal() {
+    if (!state.data) return;
+    if (READONLY) {
+      // 快照模式：从内嵌数据本地过滤（快照数据即全量）
+      state.data = Store.enrich(SNAP, { from: state.range.from, to: state.range.to });
+    } else {
+      const d = Store.reFilter({ from: state.range.from, to: state.range.to });
+      if (d) {
+        state.data = d;
+        state.db = state.db || null;
+      } else { load(false); return; } // 无缓存时兜底（首屏还没加载完）
+    }
+    renderRangeBar();
+    renderAll();
   }
 
   // ---------- 时间筛选条 ----------
@@ -130,7 +153,7 @@
   function setRange(type, from = '', to = '', reload = true) {
     const r = resolveRange(type);
     state.range = { type, from: from || r.from, to: to || r.to };
-    if (reload) load();
+    if (reload) refilterLocal();  // 本地重算，不再打网络
     else renderRangeBar();
   }
 
@@ -588,7 +611,7 @@
     }
     Store.setConfig(Object.assign({}, Store.getConfig(), { mode: mode }));
     toast('已切换到' + (mode === 'github' ? '云端' : '本地') + '模式');
-    await load();
+    Store.invalidate(); await load(true);
   });
 
   $('#ghTest').onclick = async () => {
@@ -604,7 +627,7 @@
     Store.setConfig(cfg);
     ghResult('配置已保存到本设备浏览器', 'ok');
     toast('配置已保存，正在载入云端数据');
-    await load();
+    Store.invalidate(); await load(true);
   };
 
   function renderNote() {
@@ -734,12 +757,11 @@
     };
     const id = $('#fId').value;
     try {
-      if (id) await Store.updateRecord(id, body);
-      else await Store.addRecord(body);
+      const fresh = id ? await Store.updateRecord(id, body) : await Store.addRecord(body);
       closeModal();
       toast(id ? (Store.mode === 'github' ? '已保存到云端' : '已保存修改') :
         (Store.mode === 'github' ? '已记到云端' : '已记录这笔'));
-      await load();
+      adoptFresh(fresh); // 用写入返回的完整数据直接更新界面，不再请求
       goto('ledger');
     } catch (err) { toast('保存失败：' + (err.message || err.error || '未知错误')); }
   };
@@ -747,9 +769,22 @@
   async function delRecord(id) {
     if (!confirm('确定删除这笔记录？此操作不可撤销。')) return;
     try {
-      await Store.deleteRecord(id);
-      toast('已删除'); await load();
+      const fresh = await Store.deleteRecord(id);
+      toast('已删除');
+      adoptFresh(fresh);
     } catch (err) { toast('删除失败：' + (err.message || err.error || '未知错误')); }
+  }
+
+  // 写入后用返回的完整数据就地重算当前区间，零额外网络
+  function adoptFresh(fresh) {
+    if (fresh && fresh.records) {
+      const d = Store.enrich(fresh, { from: state.range.from, to: state.range.to });
+      state.data = d;
+      state.db = state.db || null;
+      applyLoaded();
+    } else {
+      refilterLocal();
+    }
   }
   $('#btnDelete').onclick = async () => {
     const id = $('#fId').value;
@@ -814,23 +849,24 @@
   $('#accountForm').onsubmit = async e => {
     e.preventDefault();
     try {
+      let fresh;
       if (accMode === 'add') {
         const name = ($('#accName').value || '').trim();
         if (!name) throw new Error('账号名不能为空');
-        await Store.addAccount(name);
+        fresh = await Store.addAccount(name);
         toast(`已添加账号「${name}」`);
       } else if (accMode === 'rename') {
         const name = ($('#accName').value || '').trim();
         if (!name) throw new Error('账号名不能为空');
-        await Store.renameAccount(accId, name);
+        fresh = await Store.renameAccount(accId, name);
         toast('已改名，历史记录同步更新');
       } else if (accMode === 'delete') {
         const sel = $('#accMoveTo');
-        await Store.deleteAccount(accId, sel ? sel.value : '');
+        fresh = await Store.deleteAccount(accId, sel ? sel.value : '');
         toast('账号已删除');
       }
       closeAccModal();
-      await load();
+      adoptFresh(fresh);
     } catch (err) { toast(err.message || err.error || '操作失败'); }
   };
 
@@ -849,7 +885,7 @@
     if (READONLY || Store.mode === 'github') { exportCsvLocal(); return; }
     window.location.href = '/api/export.csv' + rangeQuery();
   };
-  $('#actRefresh').onclick = async () => { await load(); toast('数据已刷新'); };
+  $('#actRefresh').onclick = async () => { await load(true); toast('数据已刷新'); };
 
   // 云端/快照模式：前端内嵌当前数据生成只读单文件 HTML
   function snapshotLocal() {
@@ -908,5 +944,5 @@
     setRange('custom', from, to);
   };
 
-  load();
+  load(true);
 })();

@@ -78,14 +78,38 @@
     return API_BASE + '/repos/' + encodeURIComponent(cfg.owner) + '/' +
       encodeURIComponent(cfg.repo) + '/contents/' + cfg.path.replace(/^\//, '');
   }
-  async function ghGetFile(cfg) {
+  // 内存缓存：云端数据拉一次后放这里，切筛选/切页/切换视图都不再打网络
+  var _ghCache = null; // { key, sha, raw }
+  function ghCacheKey(cfg) {
+    return [cfg.owner, cfg.repo, cfg.path, cfg.branch].join('|');
+  }
+  function ghCacheGet(cfg) {
+    if (_ghCache && _ghCache.key === ghCacheKey(cfg)) return _ghCache;
+    return null;
+  }
+  function ghCacheSet(cfg, sha, raw) {
+    _ghCache = { key: ghCacheKey(cfg), sha: sha, raw: raw };
+  }
+  function ghCacheClear() { _ghCache = null; }
+
+  // force=true 时强制读网络（首次加载/手动刷新/写入前拿最新 sha），否则命中缓存直接返回
+  async function ghGetFile(cfg, force) {
+    if (!force) {
+      var hit = ghCacheGet(cfg);
+      if (hit) return { sha: hit.sha, raw: hit.raw, cached: true };
+    }
     var url = contentUrl(cfg) + '?ref=' + encodeURIComponent(cfg.branch) + '&t=' + Date.now();
     var r = await fetch(url, { headers: ghHeaders(cfg), cache: 'no-store' });
-    if (r.status === 404) return { sha: null, raw: emptyRaw() };
+    if (r.status === 404) {
+      var empty = emptyRaw();
+      ghCacheSet(cfg, null, empty);
+      return { sha: null, raw: empty, cached: false };
+    }
     if (!r.ok) throw new Error('读取云端数据失败 (HTTP ' + r.status + ')');
     var j = await r.json();
     var raw = JSON.parse(b64ToUtf8(j.content));
-    return { sha: j.sha, raw: raw };
+    ghCacheSet(cfg, j.sha, raw);
+    return { sha: j.sha, raw: raw, cached: false };
   }
   async function ghPutFile(cfg, raw, sha, message) {
     var body = {
@@ -211,32 +235,52 @@
   }
 
   // ---------- 读取 ----------
-  async function load(range) {
+  var _serverRaw = null; // 本地模式下也缓存一份全量，供切筛选本地重算
+
+  // force=true 才真正打网络；默认用内存缓存（切筛选/切页秒开）
+  async function load(range, force) {
     var cfg = getConfig();
     if (cfg.mode === 'github') {
       if (!cfg.owner || !cfg.repo || !cfg.token) throw new Error('请先配置 GitHub 仓库与令牌');
-      var got = await ghGetFile(cfg);
-      return enrich(got.raw, range);
+      var got = await ghGetFile(cfg, !!force);
+      var data = enrich(got.raw, range);
+      data._cached = !!got.cached;
+      return data;
     }
-    var from = range && range.from, to = range && range.to;
-    var qs = (from || to) ? '?from=' + encodeURIComponent(from || '') + '&to=' + encodeURIComponent(to || '') : '';
-    var r = await fetch('/api/data' + qs);
+    // 本地模式：始终取全量，筛选在本地做（数据小，省掉来回请求）
+    var r = await fetch('/api/data' + (force ? '?_=' + Date.now() : ''));
     var j = await r.json();
     if (!j.ok) throw new Error(j.error || '载入失败');
-    return j.data;
+    _serverRaw = j.data;
+    return enrich(j.data, range);
   }
 
+  // 本地重算：用已缓存的全量数据按新区间重新聚合，零网络
+  function reFilter(range) {
+    var cfg = getConfig();
+    var raw = null;
+    if (cfg.mode === 'github') {
+      var hit = ghCacheGet(cfg);
+      raw = hit && hit.raw;
+    } else {
+      raw = _serverRaw;
+    }
+    if (!raw) return null;
+    return enrich(raw, range);
+  }
+
+  // dbInfo 只读缓存，绝不额外发请求（数据来自 load 的那一次拉取）
   async function dbInfo() {
     var cfg = getConfig();
     if (cfg.mode === 'github') {
-      var got = await ghGetFile(cfg);
-      var data = enrich(got.raw, {});
+      var hit = ghCacheGet(cfg);
+      var raw = hit ? hit.raw : emptyRaw();
       return {
         path: 'GitHub: ' + cfg.owner + '/' + cfg.repo + '/' + cfg.path + ' (' + cfg.branch + ')',
-        sizeKB: Math.round(JSON.stringify(got.raw).length / 1024 * 10) / 10,
-        tables: ['Contents API'], count: got.raw.records.length,
-        accountCount: (got.raw.accountList || []).length,
-        lastWrite: got.raw.meta && got.raw.meta.exportedAt || new Date().toISOString(),
+        sizeKB: Math.round(JSON.stringify(raw).length / 1024 * 10) / 10,
+        tables: ['Contents API'], count: (raw.records || []).length,
+        accountCount: (raw.accountList || []).length,
+        lastWrite: raw.meta && raw.meta.exportedAt || new Date().toISOString(),
         cloud: true
       };
     }
@@ -249,14 +293,17 @@
   async function githubMutate(message, mutate) {
     var cfg = getConfig();
     if (!cfg.owner || !cfg.repo || !cfg.token) throw new Error('请先配置 GitHub 仓库与令牌');
-    var got = await ghGetFile(cfg);
+    // 写入前必须拿最新 sha，防止多设备覆盖；这次网络请求不能省
+    var got = await ghGetFile(cfg, true);
     var raw = got.raw;
     if (!raw.accountList) raw.accountList = [];
     if (!raw.records) raw.records = [];
     if (!raw.nextId) raw.nextId = Math.max(0, Math.max.apply(null, [0].concat(raw.records.map(function (r) { return Number(r.id) || 0; })))) + 1;
     if (!raw.nextAccountId) raw.nextAccountId = Math.max(0, Math.max.apply(null, [0].concat(raw.accountList.map(function (a) { return Number(a.id) || 0; })))) + 1;
     var result = mutate(raw, cfg);
-    await ghPutFile(cfg, raw, got.sha, message);
+    var newSha = await ghPutFile(cfg, raw, got.sha, message);
+    // 写回后立即刷新缓存：后续切筛选/切页都用这份最新数据，不用再请求
+    ghCacheSet(cfg, newSha, raw);
     return enrich(raw, {});
   }
 
@@ -401,7 +448,7 @@
       throw new Error('连接失败 (HTTP ' + r.status + ')');
     }
     var repo = await r.json();
-    var got = await ghGetFile(merged);
+    var got = await ghGetFile(merged, true); // 测试连接强制拉最新，同时刷新缓存
     var data = enrich(got.raw, {});
     return { ok: true, repo: repo.full_name, private: repo.private,
       count: got.raw.records.length, accounts: (got.raw.accountList || []).length,
@@ -411,10 +458,10 @@
   window.Store = {
     getConfig: getConfig, setConfig: setConfig,
     get mode() { return getConfig().mode; },
-    load: load, dbInfo: dbInfo, enrich: enrich,
+    load: load, reFilter: reFilter, dbInfo: dbInfo, enrich: enrich,
     addRecord: addRecord, updateRecord: updateRecord, deleteRecord: deleteRecord,
     addAccount: addAccount, renameAccount: renameAccount, deleteAccount: deleteAccount,
-    testGithub: testGithub,
+    testGithub: testGithub, invalidate: ghCacheClear,
     helpers: { utf8ToB64: utf8ToB64, b64ToUtf8: b64ToUtf8, emptyRaw: emptyRaw }
   };
 })();
